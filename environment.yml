@@ -1,0 +1,8 @@
+name: ai4physicshydrology
+channels:
+- conda-forge
+dependencies:
+        - torchdiffeq
+        - pytest
+        - black
+        - pip
