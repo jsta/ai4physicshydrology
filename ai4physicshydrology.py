@@ -160,3 +160,59 @@ class SurfaceFlowTerm(nn.Module):
 class SubsurfaceFlowTerm(nn.Module):
     def __init__(self, S1max, ks, n):
         super().__init__()
+        self.S1max = S1max
+        self.ks = ks
+        self.n = n
+        self.z = torch.tensor(0.0, dtype=dtype)
+
+    def forward(self, x, S1):
+        ks_val = self.ks(x)
+        S1max_val = self.S1max(x)
+        n_val = self.n(x)
+        subsurf_flow = ks_val * (S1 / S1max_val) ** n_val
+        return torch.clamp(subsurf_flow, self.z, S1max_val)
+
+
+class HydroEquation(nn.Module):
+    def __init__(self, S0max, S1max, p, ku, ks, c, b, n):
+        super().__init__()
+        self.S0max = S0max
+        self.S1max = S1max
+        self.p = p
+        self.ku = ku
+        self.ks = ks
+        self.c = c
+        self.b = b
+        self.n = n
+
+        self.et_term = ETTerm(self.S0max, self.p)
+        self.drainage_term = DrainageTerm(self.S0max, self.ku, self.c)
+        self.saturated_area_term = SaturatedAreaTerm(self.S0max, self.b)
+        self.surface_flow_term = SurfaceFlowTerm(self.saturated_area_term)
+        self.subsurf_flow_term = SubsurfaceFlowTerm(self.S1max, self.ks, self.n)
+
+    def forward(self, t, storage):
+        S0, S1 = storage
+        pet, prcp, *attrs = self.forcing
+        x = torch.stack(attrs)
+        self.et = self.et_term(x, S1, pet)
+        self.drainage = self.drainage_term(x, S0)
+        self.surface_flow = self.surface_flow_term(x, S0, prcp)
+        self.subsurf_flow = self.subsurf_flow_term(x, S1)
+        self.qtotal = self.surface_flow + self.subserf_flow
+
+        dS0_dt = torch.clamp(
+            prcp - self.et - self.drainage - self.surface_flow,
+            min=-S0,
+            max=self.S0max(x) - S0,
+        )
+        dS1_dt = torch.clamp(
+            self.drainage - self.subsurf_flow, min=-S1, max=self.S1max(x) - S1
+        )
+        dS_dt = torch.hstack([dS0_dt, dS1_dt])
+        return dS_dt
+
+
+class HydroSimulator(nn.Module):
+    def __init__(self, S0max, S1max, p, ku, ks, c, b, n, method="euler"):
+        super().__init__()
