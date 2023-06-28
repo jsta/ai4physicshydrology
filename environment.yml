@@ -1,9 +1,10 @@
 name: ai4physicshydrology
 channels:
-- conda-forge
+        - conda-forge
 dependencies:
         - torchdiffeq
         - pytest
         - black
         - tqdm
+        - matplotlib
         - pip
