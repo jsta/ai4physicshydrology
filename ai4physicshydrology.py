@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn as nn
 from torchdiffeq import odeint
 from tqdm.auto import tqdm
+import xarray as xr
 
 max_epochs = 300
 width = 12
@@ -216,3 +217,45 @@ class HydroEquation(nn.Module):
 class HydroSimulator(nn.Module):
     def __init__(self, S0max, S1max, p, ku, ks, c, b, n, method="euler"):
         super().__init__()
+        self.method = method
+        self.register_buffer("t", torch.tensor([0, 1], dtype=dtype))
+        self.ode = HydroEquation(S0max, S1max, p, ku, ks, c, b, n)
+
+    def forward(self, forcing, storage):
+        qtotal = []
+        storage_ts = []
+        surf_flow = []
+        subsurf_flow = []
+        drainage = []
+        et = []
+        for f in forcing:
+            self.ode.forcing = f
+            storage = odeint(self.ode, storage, self.t, method=self.method)
+            storage = storage[-1].clone().detach()
+            storage_ts.append(storage)
+            qtotal.append(self.ode.qtotal)
+            surf_flow.append(self.ode.surface_flow)
+            subsurf_flow.append(self.ode.subsurf_flow)
+            drainage.append(self.ode.drainage)
+            et.append(self.ode.et)
+        self.end_storage = storage
+        self.storage_ts = torch.stack(storage_ts)
+        self.surface_flow = torch.stack(surf_flow)
+        self.subssurface_flow = torch.stack(subsurf_flow)
+        self.drainge = torch.stack(drainage)
+        self.et = torch.stack(et)
+        return torch.stack(qtotal)
+
+
+ds = xr.open_dataset(
+    "camels_attrs_v2_streamflow_v1p2.nc/camels_attrs_v2_streamflow_v1p2.nc"
+)
+selected_basin = "11143000"
+train_time = slice("10-01-1989", "09-30-1996")
+test_time = slice("10-01-1997", "09-30-1999")
+train_ds = ds.sel(station_id=selected_basin, time=train_time)
+test_ds = ds.sel(station_id=selected_basin, time=test_time)
+seq_len = 365
+attrs = ["elevation", "area", "frac_forest", "aridity"]
+in_vars = ["pet", "prcp"] + attrs
+out_vars = ["QObs"]

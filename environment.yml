@@ -7,4 +7,6 @@ dependencies:
         - black
         - tqdm
         - matplotlib
+        - xarray
+        - netCDF4
         - pip
