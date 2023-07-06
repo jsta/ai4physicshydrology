@@ -44,28 +44,6 @@ class MLP(nn.Module):
         return x
 
 
-class ReservoirEquation(nn.Module):
-    def __init__(self, K):
-        super().__init__()
-        self.K = K
-
-    def forward(self, t, x):
-        return self.K(x) * x
-
-
-class TorchDiffEQNeuralReservoir(nn.Module):
-    def __init__(self, width, depth, solver_method="implicit_adams"):
-        super().__init__()
-        self.K = MLP(width, depth)
-        self.res = ReservoirEquation(self.K)
-        self.time = torch.tensor([0, 1], dtype=torch.float64)
-        self.method = solver_method
-
-    def forward(self, x):
-        S_all = odeint(self.res, x, self.time, method=self.method)
-        return S_all[-1]
-
-
 class HydroParam(nn.Module):
     def __init__(self, low, high, net):
         super().__init__()
@@ -140,7 +118,7 @@ class SubsurfaceFlowTerm(nn.Module):
         self.S1max = S1max
         self.ks = ks
         self.n = n
-        self.z = torch.tensor(0.0, dtype=dtype)
+        self.z = nn.Parameter(torch.tensor(0.0, dtype=dtype))
 
     def forward(self, x, S1):
         ks_val = self.ks(x)
@@ -237,8 +215,8 @@ class MultipleTrajectoryDataset(Dataset):
     def __getitem__(self, idx):
         time_slice = slice(self.time_starts[idx], self.time_ends[idx])
         sample_ds = self.ds.isel(time=time_slice)
-        x = torch.from_numpy(sample_ds[self.in_vars].to_dataframe().values)
-        y = torch.from_numpy(sample_ds[self.out_vars].to_dataframe().values)
+        x = torch.from_numpy(sample_ds[self.in_vars].to_pandas().values)
+        y = torch.from_numpy(sample_ds[self.out_vars].to_pandas().values)
         return x, y
 
     def __len__(self):
@@ -276,12 +254,11 @@ test_time = slice("10-01-1997", "09-30-1999")
 train_ds = ds.sel(station_id=selected_basin, time=train_time)
 test_ds = ds.sel(station_id=selected_basin, time=test_time)
 seq_len = 365
-attrs = ["elevation", "area", "frac_forest", "aridity"]
-in_vars = ["pet", "prcp"] + attrs
-out_vars = ["QObs"]
+attrs = ["elev_mean", "area_gages2", "frac_forest", "aridity"]
+in_vars = ["pet_mean", "p_mean"] + attrs
+out_vars = ["discharge"]
 
 train_data = MultipleTrajectoryDataset(train_ds, in_vars, out_vars, seq_len)
-
 test_data = MultipleTrajectoryDataset(test_ds, in_vars, out_vars, len(test_ds["time"]))
 
 initial_storage = torch.tensor([30.0, 50.0], dtype=torch.float32)
@@ -310,10 +287,13 @@ max_epochs = 6
 max_sub_epochs = 2
 train_loss_history = {i: [] for i in range(len(train_data))}
 for epoch in tqdm(range(max_epochs)):
+    # epoch = 1
     storage = initial_storage.clone().to(device)
     for idx_traj in np.arange(len(train_data)):
+        # idx_traj = 0
         for sub_epoch in range(max_sub_epochs):
+            # sub_epoch = 0
             data = train_data[idx_traj]
-            l = update_model_step(model, opt, data, storage.close())
+            l = update_model_step(model, opt, data, storage.clone())
             train_loss_history[idx_traj].append(l.detach().cpu().numpy())
         storage = update_ic_step(model, data, storage.clone())
