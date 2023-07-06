@@ -266,6 +266,7 @@ def update_ic_step(model, train_data, S_init):
     return final_storage
 
 
+# From: https://www.hydroshare.org/resource/658c359b8c83494aac0f58145b1b04e6/
 ds = xr.open_dataset(
     "camels_attrs_v2_streamflow_v1p2.nc/camels_attrs_v2_streamflow_v1p2.nc"
 )
