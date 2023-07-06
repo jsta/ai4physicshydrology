@@ -1,9 +1,11 @@
 import torch
 import numpy as np
-import torch.nn as nn
-from torchdiffeq import odeint
-from tqdm.auto import tqdm
 import xarray as xr
+import torch.nn as nn
+from tqdm.auto import tqdm
+from torchdiffeq import odeint
+from torch.utils.data import Dataset
+
 
 max_epochs = 300
 width = 12
@@ -12,20 +14,6 @@ learning_rate = 3e-3
 
 dtype = torch.float32
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-def epoch(X, y, model, loss_fun, opt, device=device):
-    total_loss, total_err = 0.0, 0.0
-    n_iter = X.shape[0]
-    for i in range(n_iter):
-        Xd, yd = X[i].to(device), y[i].to(device)
-        opt.zero_grad()
-        yp = model(Xd)
-        loss = loss_fun(yp.squeeze(), yd.squeeze())
-        loss.backward()
-        opt.step()
-        total_loss += loss.item() * X.shape[0]
-    return total_loss / len(X)
 
 
 class MLP(nn.Module):
@@ -76,18 +64,6 @@ class TorchDiffEQNeuralReservoir(nn.Module):
     def forward(self, x):
         S_all = odeint(self.res, x, self.time, method=self.method)
         return S_all[-1]
-
-
-model = TorchDiffEQNeuralReservoir(width, depth).to(device)
-loss_fun = torch.nn.MSELoss()
-opt = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-loss_history = []
-for i in tqdm(range(max_epochs)):
-    train_loss = epoch(train_X, train_Y, model, loss_fun, opt)
-    loss_history.append(train_loss)
-
-v = torch.tensor(np.arange(0.0, 1.0, step=0.0001), dtype=dtype)
 
 
 class HydroParam(nn.Module):
@@ -247,6 +223,49 @@ class HydroSimulator(nn.Module):
         return torch.stack(qtotal)
 
 
+class MultipleTrajectoryDataset(Dataset):
+    def __init__(self, ds, in_vars, out_vars, trajectory_len):
+        super().__init__()
+        self.ds = ds.load().drop("hru")
+        self.in_vars = in_vars
+        self.out_vars = out_vars
+        self.trajectory_len = trajectory_len
+        self.n_trajectories = int(len(self.ds["time"]) / self.trajectory_len)
+        self.time_starts = [i * trajectory_len for i in range(self.n_trajectories)]
+        self.time_ends = [(i + 1) * trajectory_len for i in range(self.n_trajectories)]
+
+    def __getitem__(self, idx):
+        time_slice = slice(self.time_starts[idx], self.time_ends[idx])
+        sample_ds = self.ds.isel(time=time_slice)
+        x = torch.from_numpy(sample_ds[self.in_vars].to_dataframe().values)
+        y = torch.from_numpy(sample_ds[self.out_vars].to_dataframe().values)
+        return x, y
+
+    def __len__(self):
+        return len(self.time_starts)
+
+
+def update_model_step(
+    model, opt, train_data, S_init, loss_fun=torch.nn.MSELoss(), device=device
+):
+    Xd, yd = train_data
+    Xd = Xd.to(device)
+    yd = yd.to(device)
+    opt.zero_grad()
+    yp = model(Xd, storage=S_init)
+    loss = loss_fun(yp.squeeze(), yd.squeeze())
+    loss.backward()
+    opt.step()
+    return loss
+
+
+def update_ic_step(model, train_data, S_init):
+    forcing, q_true = train_data
+    q_pred = model(forcing, storage=S_init)
+    final_storage = model.end_storage.close().detach()
+    return final_storage
+
+
 ds = xr.open_dataset(
     "camels_attrs_v2_streamflow_v1p2.nc/camels_attrs_v2_streamflow_v1p2.nc"
 )
@@ -259,3 +278,41 @@ seq_len = 365
 attrs = ["elevation", "area", "frac_forest", "aridity"]
 in_vars = ["pet", "prcp"] + attrs
 out_vars = ["QObs"]
+
+train_data = MultipleTrajectoryDataset(train_ds, in_vars, out_vars, seq_len)
+
+test_data = MultipleTrajectoryDataset(test_ds, in_vars, out_vars, len(test_ds["time"]))
+
+initial_storage = torch.tensor([30.0, 50.0], dtype=torch.float32)
+
+width = 6
+depth = 1
+in_dim = len(attrs)
+
+S0max = HydroParam(50.000, 200.0, MLP(width, depth, in_dim=in_dim))
+S1max = HydroParam(100.000, 500.0, MLP(width, depth, in_dim=in_dim))
+p = HydroParam(0.001, 1.5, MLP(width, depth, in_dim=in_dim))
+ku = HydroParam(0.010, 100.0, MLP(width, depth, in_dim=in_dim))
+ks = HydroParam(0.010, 100.0, MLP(width, depth, in_dim=in_dim))
+b = HydroParam(0.001, 3.0, MLP(width, depth, in_dim=in_dim))
+c = HydroParam(0.010, 10.0, MLP(width, depth, in_dim=in_dim))
+n = HydroParam(0.010, 10.0, MLP(width, depth, in_dim=in_dim))
+
+model = HydroSimulator(S0max, S1max, p, ku, ks, b, c, n).to(device)
+model.to(device)
+
+learning_rate = 3e-3
+opt = torch.optim.Adam(model.parameters(), lr=learning_rate)
+loss_fun = torch.nn.MSELoss()
+
+max_epochs = 6
+max_sub_epochs = 2
+train_loss_history = {i: [] for i in range(len(train_data))}
+for epoch in tqdm(range(max_epochs)):
+    storage = initial_storage.clone().to(device)
+    for idx_traj in np.arange(len(train_data)):
+        for sub_epoch in range(max_sub_epochs):
+            data = train_data[idx_traj]
+            l = update_model_step(model, opt, data, storage.close())
+            train_loss_history[idx_traj].append(l.detach().cpu().numpy())
+        storage = update_ic_step(model, data, storage.clone())
