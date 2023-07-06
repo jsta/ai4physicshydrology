@@ -80,7 +80,7 @@ class HydroParam(nn.Module):
 
 class ETTerm(nn.Module):
     def __init__(self, S0max, p):
-        super.__init__()
+        super().__init__()
         self.S0max = S0max
         self.p = p
         self.register_buffer("z", torch.tensor([0.0], dtype=dtype))
@@ -226,7 +226,7 @@ class HydroSimulator(nn.Module):
 class MultipleTrajectoryDataset(Dataset):
     def __init__(self, ds, in_vars, out_vars, trajectory_len):
         super().__init__()
-        self.ds = ds.load().drop("hru")
+        self.ds = ds.load().drop("station_id")
         self.in_vars = in_vars
         self.out_vars = out_vars
         self.trajectory_len = trajectory_len
@@ -299,7 +299,7 @@ c = HydroParam(0.010, 10.0, MLP(width, depth, in_dim=in_dim))
 n = HydroParam(0.010, 10.0, MLP(width, depth, in_dim=in_dim))
 
 model = HydroSimulator(S0max, S1max, p, ku, ks, b, c, n).to(device)
-model.to(device)
+# model.to(device)
 
 learning_rate = 3e-3
 opt = torch.optim.Adam(model.parameters(), lr=learning_rate)
